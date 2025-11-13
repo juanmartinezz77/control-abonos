@@ -388,7 +388,8 @@ def main():
             col_a, col_b = st.columns(2)
             with col_a:
                 cliente = st.text_input("Cliente", key="cliente_new")
-                valor_acordado = st.number_input("Valor acordado", min_value=0.0, key="valor_new")
+                # step 100 para incrementar/decrementar de 100 en 100
+                valor_acordado = st.number_input("Valor acordado", min_value=0.0, step=100.0, format="%.2f", key="valor_new")
             with col_b:
                 descripcion = st.text_input("Descripción", key="desc_new")
                 etapa = st.text_input("Etapa", key="etapa_new")
@@ -406,7 +407,7 @@ def main():
         casos_now = fetch_casos(conn)
         if not casos_now.empty:
             st.markdown("### Lista de casos")
-            st.dataframe(casos_now, use_container_width=True)
+            st.dataframe(casos_now, width="stretch")
 
             # Editar caso
             st.markdown("#### Editar / Eliminar caso")
@@ -418,7 +419,7 @@ def main():
                 c_row = casos_now.loc[casos_now["id"] == caso_id_sel].iloc[0]
                 cliente_e = st.text_input("Cliente", value=c_row["cliente"], key="cliente_edit")
                 descripcion_e = st.text_input("Descripción", value=c_row["descripcion"], key="desc_edit")
-                valor_e = st.number_input("Valor acordado", value=float(c_row["valor_acordado"]), min_value=0.0, key="valor_edit")
+                valor_e = st.number_input("Valor acordado", value=float(c_row["valor_acordado"]), min_value=0.0, step=100.0, format="%.2f", key="valor_edit")
                 etapa_e = st.text_input("Etapa", value=c_row["etapa"], key="etapa_edit")
                 obs_e = st.text_area("Observaciones", value=c_row["observaciones"], key="obs_edit")
                 btns = st.columns([1, 1])
@@ -429,8 +430,13 @@ def main():
                     except Exception:
                         logging.exception("Error editando caso")
                         st.error("Error al actualizar el caso. Revisa los logs.")
+                # Eliminación: requiere marcar confirmación y pulsar el botón
+                confirm_key = f"confirm_delete_case_{caso_id_sel}"
+                confirm_delete = st.checkbox("Marcar para confirmar eliminación del caso seleccionado", key=confirm_key)
                 if btns[1].form_submit_button("Eliminar caso"):
-                    if st.confirm(f"¿Deseas eliminar el caso id={caso_id_sel}? Esto eliminará también sus abonos."):
+                    if not confirm_delete:
+                        st.error("Debes marcar la casilla de confirmación antes de eliminar.")
+                    else:
                         try:
                             delete_caso(conn, caso_id_sel)
                             st.success("Caso eliminado.")
@@ -452,7 +458,8 @@ def main():
                 caso_sel = st.selectbox("Selecciona Caso", options=opciones, format_func=lambda x: x[1])
                 caso_id_seleccionado = caso_sel[0] if isinstance(caso_sel, tuple) else caso_sel
                 fecha = st.date_input("Fecha", value=date.today())
-                monto = st.number_input("Monto", min_value=0.0, format="%.2f")
+                # step 100 para incrementar/decrementar de 100 en 100
+                monto = st.number_input("Monto", min_value=0.0, step=100.0, format="%.2f")
                 observaciones = st.text_area("Observaciones")
                 if st.form_submit_button("Agregar Abono"):
                     try:
@@ -471,7 +478,7 @@ def main():
         abonos = fetch_abonos(conn)
         if not abonos.empty:
             st.markdown("### Últimos abonos")
-            st.dataframe(abonos, use_container_width=True)
+            st.dataframe(abonos, width="stretch")
 
             # Editar / Eliminar abono
             st.markdown("#### Editar / Eliminar abono")
@@ -481,9 +488,11 @@ def main():
 
             with st.form("form_abono_edit"):
                 a_row = abonos.loc[abonos["id"] == abono_id_sel].iloc[0]
-                caso_for_edit = st.selectbox("Caso (editar)", options=opciones, format_func=lambda x: x[1], index=[o[0] for o in opciones].index(int(a_row["caso_id"])))
+                # caso selection: reuse opciones
+                caso_index = [o[0] for o in opciones].index(int(a_row["caso_id"])) if opciones else 0
+                caso_for_edit = st.selectbox("Caso (editar)", options=opciones, format_func=lambda x: x[1], index=caso_index)
                 fecha_e = st.date_input("Fecha", value=pd.to_datetime(a_row["fecha"]).date(), key="fecha_edit")
-                monto_e = st.number_input("Monto", value=float(a_row["monto"]), min_value=0.0, format="%.2f", key="monto_edit")
+                monto_e = st.number_input("Monto", value=float(a_row["monto"]), min_value=0.0, step=100.0, format="%.2f", key="monto_edit")
                 obs_e = st.text_area("Observaciones", value=a_row["observaciones"], key="obs_abono_edit")
                 btns_ab = st.columns([1, 1])
                 if btns_ab[0].form_submit_button("Guardar cambios"):
@@ -493,8 +502,13 @@ def main():
                     except Exception:
                         logging.exception("Error editando abono")
                         st.error("Error al actualizar el abono. Revisa los logs.")
+                # Eliminación abono (requerir confirmación)
+                confirm_key_ab = f"confirm_delete_abono_{abono_id_sel}"
+                confirm_delete_ab = st.checkbox("Marcar para confirmar eliminación del abono seleccionado", key=confirm_key_ab)
                 if btns_ab[1].form_submit_button("Eliminar abono"):
-                    if st.confirm(f"¿Deseas eliminar el abono id={abono_id_sel}?"):
+                    if not confirm_delete_ab:
+                        st.error("Debes marcar la casilla de confirmación antes de eliminar.")
+                    else:
                         try:
                             delete_abono(conn, abono_id_sel)
                             st.success("Abono eliminado.")
@@ -530,7 +544,7 @@ def main():
             display["valor_acordado"] = display["valor_acordado"].apply(money)
             display["total_abonado"] = display["total_abonado"].apply(money)
             display["saldo_pendiente"] = display["saldo_pendiente"].apply(money)
-            st.dataframe(display, use_container_width=True)
+            st.dataframe(display, width="stretch")
 
             # Exportes (usar datos sin formatear)
             st.download_button("⬇️ Exportar Resumen a CSV", data=to_csv_bytes(resumen_df), file_name="resumen_abonos.csv", mime="text/csv")
@@ -557,7 +571,7 @@ def main():
                 valor_acordado=df_export["valor_acordado"].apply(money),
                 total_abonado=df_export["total_abonado"].apply(money),
                 saldo_pendiente=df_export["saldo_pendiente"].apply(money),
-            ), use_container_width=True)
+            ), width="stretch")
 
             st.download_button("⬇️ Exportar CSV (Global)", data=to_csv_bytes(df_export), file_name="resumen_abonos_global.csv", mime="text/csv")
             st.download_button("⬇️ Exportar Excel (Global)", data=to_excel_bytes(df_export), file_name="resumen_abonos_global.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
