@@ -245,7 +245,8 @@ def main():
 
     conn = get_connection()
     init_db(conn)
-    seed_example_data(conn)
+# seed_example_data(conn)  # ← desactivado: no se insertan ejemplos
+
 
     tab_casos, tab_abonos, tab_resumen, tab_reportes = st.tabs(["Casos", "Abonos", "Resumen", "Reportes"])
 
