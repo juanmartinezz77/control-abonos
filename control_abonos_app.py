@@ -72,10 +72,10 @@ def init_db(conn):
 def fetch_casos(conn, cliente_filter=None, etapa_filter=None):
     q = "SELECT * FROM casos"
     params, conditions = [], []
-    if cliente_filter:
+    if cliente_filter and cliente_filter != "Todos":
         conditions.append("cliente = ?")
         params.append(cliente_filter)
-    if etapa_filter:
+    if etapa_filter and etapa_filter != "Todos":
         conditions.append("etapa = ?")
         params.append(etapa_filter)
     if conditions:
@@ -182,6 +182,41 @@ def delete_abono(conn, abono_id):
 # ------------------ REPORTS / EXPORTS ------------------
 
 
+def resumen_por_caso(conn, cliente_filter=None, etapa_filter=None):
+    """
+    Devuelve un DataFrame con columnas:
+    id, cliente, descripcion, valor_acordado, total_abonado, saldo_pendiente, etapa, observaciones
+    Aplica filtros por cliente y etapa si se pasan (usar "Todos" para no filtrar).
+    """
+    casos = fetch_casos(conn, cliente_filter, etapa_filter)
+    if casos.empty:
+        return pd.DataFrame(
+            columns=[
+                "id",
+                "cliente",
+                "descripcion",
+                "valor_acordado",
+                "total_abonado",
+                "saldo_pendiente",
+                "etapa",
+                "observaciones",
+            ]
+        )
+    abonos = pd.read_sql_query("SELECT caso_id, SUM(monto) as total_abonado FROM abonos GROUP BY caso_id", conn)
+    merged = casos.merge(abonos, left_on="id", right_on="caso_id", how="left")
+    merged["total_abonado"] = merged["total_abonado"].fillna(0.0)
+    merged["saldo_pendiente"] = merged["valor_acordado"] - merged["total_abonado"]
+    # Seleccionar y ordenar columnas
+    result = merged[
+        ["id", "cliente", "descripcion", "valor_acordado", "total_abonado", "saldo_pendiente", "etapa", "observaciones"]
+    ].copy()
+    # Asegurar tipos numéricos
+    result["valor_acordado"] = result["valor_acordado"].astype(float)
+    result["total_abonado"] = result["total_abonado"].astype(float)
+    result["saldo_pendiente"] = result["saldo_pendiente"].astype(float)
+    return result
+
+
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
@@ -198,20 +233,24 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
         thin = Side(border_style="thin", color="AAAAAA")
         border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
+        # Stylize header
         for cell in ws[1]:
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = header_alignment
 
+        # Borders and alignment
         for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
             for cell in row:
                 cell.border = border
                 cell.alignment = Alignment(vertical="center")
 
+        # Autosize columns
         for column_cells in ws.columns:
             length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in column_cells)
             ws.column_dimensions[get_column_letter(column_cells[0].column)].width = min(length + 4, 60)
 
+        # Numeric formatting
         for col in ws.iter_cols(min_row=2, max_row=ws.max_row):
             if all((isinstance(c.value, (int, float)) or c.value is None) for c in col):
                 for cell in col:
@@ -307,11 +346,8 @@ def main():
                 st.session_state["logged_in"] = True
                 st.session_state["usuario"] = user
                 st.success(f"Bienvenido, {user} ✅")
-                # No usar st.experimental_rerun (compatibilidad con distintas versiones).
-                # Al no llamar a st.stop() aquí, la ejecución continua y la app mostrará la UI principal.
             else:
                 st.error("Usuario o contraseña incorrectos.")
-        # Si aún no se ha autenticado, detener la ejecución para que solo se muestre la pantalla de login.
         if not st.session_state["logged_in"]:
             st.stop()
 
@@ -331,7 +367,6 @@ def main():
 
     col1, col2 = st.columns([1, 4])
     with col1:
-        # usar on_click para cambiar el estado y permitir que Streamlit vuelva a ejecutar la app automáticamente
         st.button("Cerrar sesión", on_click=lambda: logout())
     with col2:
         st.markdown('<div class="big-title">⚖️ Control de Abonos — Dashboard</div>', unsafe_allow_html=True)
@@ -368,18 +403,19 @@ def main():
                     logging.exception("Error agregando caso")
                     st.error("Error al agregar caso. Revisa los logs.")
 
-        if not casos_df.empty:
+        casos_now = fetch_casos(conn)
+        if not casos_now.empty:
             st.markdown("### Lista de casos")
-            st.dataframe(casos_df, use_container_width=True)
+            st.dataframe(casos_now, use_container_width=True)
 
             # Editar caso
             st.markdown("#### Editar / Eliminar caso")
-            opciones_casos = [(int(r["id"]), f"{r['id']} — {r['cliente']} — {r['descripcion'] or ''}") for _, r in casos_df.iterrows()]
+            opciones_casos = [(int(r["id"]), f"{r['id']} — {r['cliente']} — {r['descripcion'] or ''}") for _, r in casos_now.iterrows()]
             seleccionado = st.selectbox("Selecciona caso", options=opciones_casos, format_func=lambda x: x[1])
             caso_id_sel = seleccionado[0] if isinstance(seleccionado, tuple) else seleccionado
 
             with st.form("form_caso_edit"):
-                c_row = casos_df.loc[casos_df["id"] == caso_id_sel].iloc[0]
+                c_row = casos_now.loc[casos_now["id"] == caso_id_sel].iloc[0]
                 cliente_e = st.text_input("Cliente", value=c_row["cliente"], key="cliente_edit")
                 descripcion_e = st.text_input("Descripción", value=c_row["descripcion"], key="desc_edit")
                 valor_e = st.number_input("Valor acordado", value=float(c_row["valor_acordado"]), min_value=0.0, key="valor_edit")
@@ -405,11 +441,12 @@ def main():
     # ------------------ TAB ABONOS ------------------
     with tab_abonos:
         st.subheader("💰 Abonos")
-        if casos_df.empty:
+        casos_now = fetch_casos(conn)
+        if casos_now.empty:
             st.info("Registra primero al menos un caso para agregar abonos.")
         else:
             st.markdown("Agregar un abono al caso seleccionado.")
-            opciones = [(int(r["id"]), f"{r['id']} — {r['cliente']} — {r['descripcion'] or ''}") for _, r in casos_df.iterrows()]
+            opciones = [(int(r["id"]), f"{r['id']} — {r['cliente']} — {r['descripcion'] or ''}") for _, r in casos_now.iterrows()]
 
             with st.form("nuevo_abono_form"):
                 caso_sel = st.selectbox("Selecciona Caso", options=opciones, format_func=lambda x: x[1])
@@ -468,31 +505,68 @@ def main():
     # ------------------ TAB RESUMEN ------------------
     with tab_resumen:
         st.subheader("📊 Resumen por Caso")
-        resumen_df = resumen_por_caso(conn) if "resumen_por_caso" in globals() else pd.DataFrame()
+        # Filtros
+        clientes = ["Todos"] + sorted(list(fetch_casos(conn)["cliente"].dropna().unique())) if not fetch_casos(conn).empty else ["Todos"]
+        etapas = ["Todos"] + sorted(list(fetch_casos(conn)["etapa"].fillna("").unique()))
+        cliente_filter = st.selectbox("Filtrar por cliente", clientes)
+        etapa_filter = st.selectbox("Filtrar por etapa", etapas)
+
+        resumen_df = resumen_por_caso(conn, cliente_filter=cliente_filter, etapa_filter=etapa_filter)
         if resumen_df.empty:
-            st.info("No hay datos disponibles.")
+            st.info("No hay datos disponibles con los filtros seleccionados.")
         else:
+            # Totales generales
+            total_acordado = resumen_df["valor_acordado"].sum()
+            total_abonado = resumen_df["total_abonado"].sum()
+            total_pendiente = resumen_df["saldo_pendiente"].sum()
+
+            colA, colB, colC = st.columns(3)
+            colA.metric("Total valor acordado", money(total_acordado))
+            colB.metric("Total abonado", money(total_abonado))
+            colC.metric("Total saldo pendiente", money(total_pendiente))
+
+            # Mostrar tabla con formato legible
             display = resumen_df.copy()
             display["valor_acordado"] = display["valor_acordado"].apply(money)
             display["total_abonado"] = display["total_abonado"].apply(money)
             display["saldo_pendiente"] = display["saldo_pendiente"].apply(money)
             st.dataframe(display, use_container_width=True)
 
+            # Exportes (usar datos sin formatear)
+            st.download_button("⬇️ Exportar Resumen a CSV", data=to_csv_bytes(resumen_df), file_name="resumen_abonos.csv", mime="text/csv")
+            st.download_button("⬇️ Exportar Resumen a Excel", data=to_excel_bytes(resumen_df), file_name="resumen_abonos.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
     # ------------------ TAB REPORTES ------------------
     with tab_reportes:
-        st.subheader("📑 Exportes")
-        df_export = resumen_por_caso(conn) if "resumen_por_caso" in globals() else pd.DataFrame()
+        st.subheader("📑 Reportes y Exportes globales")
+        df_export = resumen_por_caso(conn)
         if df_export.empty:
             st.info("No hay datos para exportar.")
         else:
-            st.download_button("⬇️ Exportar a CSV", data=to_csv_bytes(df_export), file_name="resumen_abonos.csv", mime="text/csv")
-            st.download_button("⬇️ Exportar a Excel", data=to_excel_bytes(df_export), file_name="resumen_abonos.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            # Mostrar resumen global y permitir exportes
+            total_acordado = df_export["valor_acordado"].sum()
+            total_abonado = df_export["total_abonado"].sum()
+            total_pendiente = df_export["saldo_pendiente"].sum()
+
+            r1, r2, r3 = st.columns(3)
+            r1.metric("Total valor acordado", money(total_acordado))
+            r2.metric("Total abonado", money(total_abonado))
+            r3.metric("Total saldo pendiente", money(total_pendiente))
+
+            st.dataframe(df_export.assign(
+                valor_acordado=df_export["valor_acordado"].apply(money),
+                total_abonado=df_export["total_abonado"].apply(money),
+                saldo_pendiente=df_export["saldo_pendiente"].apply(money),
+            ), use_container_width=True)
+
+            st.download_button("⬇️ Exportar CSV (Global)", data=to_csv_bytes(df_export), file_name="resumen_abonos_global.csv", mime="text/csv")
+            st.download_button("⬇️ Exportar Excel (Global)", data=to_excel_bytes(df_export), file_name="resumen_abonos_global.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 def logout():
     st.session_state["logged_in"] = False
     st.session_state["usuario"] = None
-    # No usar experimental_rerun: el botón on_click provoca un rerun automático.
+    # Streamlit reejecuta automáticamente tras on_click
 
 
 if __name__ == "__main__":
