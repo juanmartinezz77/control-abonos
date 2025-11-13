@@ -1,4 +1,4 @@
-# Production app — fixes: clear inputs after submit, store dates (no time), show error message
+# Production app — fixes for widget session_state usage and clearing inputs after submit
 import re
 import streamlit as st
 import sqlite3
@@ -123,7 +123,6 @@ def fetch_abonos(conn, caso_id=None):
         try:
             df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce").dt.date
         except Exception:
-            # fallback: leave as-is
             logging.exception("No se pudo convertir columna fecha a date")
     return df
 
@@ -135,8 +134,7 @@ def add_caso(conn, cliente, descripcion, valor_acordado, etapa, observaciones, c
     c.execute("SELECT COUNT(*) FROM casos WHERE cliente = ? AND descripcion = ?", (cliente, descripcion))
     if c.fetchone()[0] > 0:
         raise ValueError("Ya existe un caso con ese cliente y descripción.")
-    # store created date as date-only ISO (YYYY-MM-DD)
-    created_date = datetime.utcnow().date().isoformat()
+    created_date = datetime.utcnow().date().isoformat()  # date-only
     c.execute(
         "INSERT INTO casos (cliente, descripcion, valor_acordado, etapa, observaciones, creado_en, creado_por) VALUES (?,?,?,?,?,?,?)",
         (cliente.strip(), descripcion, float(valor_acordado or 0), etapa, observaciones, created_date, creado_por),
@@ -180,11 +178,9 @@ def add_abono(conn, fecha, monto, caso_id, observaciones, creado_por=None):
         raise ValueError("Monto inválido.")
     if monto_val <= 0:
         raise ValueError("El monto debe ser mayor que cero.")
-    # store fecha as date-only ISO (YYYY-MM-DD)
     if isinstance(fecha, date):
         fecha_iso = fecha.isoformat()
     else:
-        # try parse; if fails, fallback to today's date
         try:
             fecha_iso = pd.to_datetime(fecha).date().isoformat()
         except Exception:
@@ -400,12 +396,13 @@ def main():
 
         col_a, col_b = st.columns(2)
         with col_a:
-            st.session_state["new_cliente"] = st.text_input("Cliente", value=st.session_state["new_cliente"], key="new_cliente")
-            st.session_state["new_valor"] = st.number_input("Valor acordado", min_value=0.0, step=100.0, format="%.2f", value=st.session_state["new_valor"], key="new_valor")
+            # widget uses key only; do not assign widget result into session_state
+            st.text_input("Cliente", key="new_cliente", value=st.session_state["new_cliente"])
+            st.number_input("Valor acordado", min_value=0.0, step=100.0, format="%.2f", key="new_valor", value=st.session_state["new_valor"])
         with col_b:
-            st.session_state["new_descripcion"] = st.text_input("Descripción", value=st.session_state["new_descripcion"], key="new_descripcion")
-            st.session_state["new_etapa"] = st.text_input("Etapa", value=st.session_state["new_etapa"], key="new_etapa")
-        st.session_state["new_obs"] = st.text_area("Observaciones", value=st.session_state["new_obs"], key="new_obs")
+            st.text_input("Descripción", key="new_descripcion", value=st.session_state["new_descripcion"])
+            st.text_input("Etapa", key="new_etapa", value=st.session_state["new_etapa"])
+        st.text_area("Observaciones", key="new_obs", value=st.session_state["new_obs"])
 
         if st.button("Agregar Caso", key="btn_add_caso"):
             try:
@@ -418,16 +415,13 @@ def main():
                     st.session_state["new_obs"],
                     creado_por=usuario,
                 )
-                # limpiar widgets: las keys coinciden con los widgets
+                # limpiar widgets: set session_state then soft rerun
                 st.session_state["new_cliente"] = ""
                 st.session_state["new_valor"] = 0.0
                 st.session_state["new_descripcion"] = ""
                 st.session_state["new_etapa"] = ""
                 st.session_state["new_obs"] = ""
                 st.success("Caso agregado correctamente.")
-                # recargar datos
-                casos_df = fetch_casos(conn)
-                # try soft rerun if available to refresh UI immediately
                 try:
                     st.experimental_rerun()
                 except Exception:
@@ -448,37 +442,44 @@ def main():
             st.markdown("Agregar nuevo abono (pulsa el botón 'Agregar Abono' para enviar).")
             opciones = [(int(r["id"]), f"{r['id']} — {r['cliente']} — {r['descripcion'] or ''}") for _, r in casos_now.iterrows()]
 
-            # ensure default select option exists
             if opciones and (st.session_state.get("abono_case") is None):
                 st.session_state["abono_case"] = opciones[0]
 
-            # widgets bound to session_state values (value=...) to ensure updates reflect immediately
-            st.selectbox("Selecciona Caso", options=opciones, format_func=lambda x: x[1], index=0 if st.session_state["abono_case"] is None else [o[0] for o in opciones].index(st.session_state["abono_case"][0]) if opciones else 0, key="abono_case")
+            # selectbox: we bind by key and provide a default value via session_state
+            # compute index safely
+            default_index = 0
+            try:
+                if st.session_state["abono_case"] is not None and opciones:
+                    # if session contains tuple, find its id
+                    stored = st.session_state["abono_case"]
+                    stored_id = stored[0] if isinstance(stored, tuple) else stored
+                    default_index = next((i for i, o in enumerate(opciones) if o[0] == stored_id), 0)
+            except Exception:
+                default_index = 0
+
+            st.selectbox("Selecciona Caso", options=opciones, format_func=lambda x: x[1], index=default_index, key="abono_case")
             st.date_input("Fecha", value=st.session_state["abono_fecha"], key="abono_fecha")
-            st.number_input("Monto", min_value=0.0, step=100.0, format="%.2f", value=st.session_state["abono_monto"], key="abono_monto")
-            st.text_area("Observaciones", value=st.session_state["abono_obs"], key="abono_obs")
+            st.number_input("Monto", min_value=0.0, step=100.0, format="%.2f", key="abono_monto", value=st.session_state["abono_monto"])
+            st.text_area("Observaciones", key="abono_obs", value=st.session_state["abono_obs"])
 
             if st.button("Agregar Abono", key="btn_add_abono"):
                 try:
                     case_selected = st.session_state["abono_case"]
                     caso_id_selected = case_selected[0] if isinstance(case_selected, tuple) else case_selected
                     fecha_val = st.session_state["abono_fecha"]
-                    # normalize fecha to date object
                     if isinstance(fecha_val, str):
                         try:
                             fecha_val = pd.to_datetime(fecha_val).date()
                         except Exception:
                             fecha_val = date.today()
                     add_abono(conn, fecha_val, st.session_state["abono_monto"], caso_id_selected, st.session_state["abono_obs"], creado_por=usuario)
-                    # limpiar widgets by setting session_state (keys match widgets)
+                    # limpiar widgets
                     st.session_state["abono_monto"] = 0.0
                     st.session_state["abono_obs"] = ""
                     st.session_state["abono_fecha"] = date.today()
                     if opciones:
                         st.session_state["abono_case"] = opciones[0]
                     st.success("Abono agregado correctamente.")
-                    # refresh data and try soft rerun to reflect cleaned inputs
-                    abonos_df = fetch_abonos(conn)
                     try:
                         st.experimental_rerun()
                     except Exception:
@@ -515,8 +516,6 @@ def main():
                     try:
                         edit_abono(conn, abono_id_sel, st.session_state["fecha_edit"], st.session_state["monto_edit"], st.session_state["case_edit_abono"][0], st.session_state["obs_abono_edit"])
                         st.success("Abono actualizado.")
-                        # refresh data
-                        abonos = fetch_abonos(conn)
                         try:
                             st.experimental_rerun()
                         except Exception:
@@ -532,7 +531,6 @@ def main():
                         try:
                             delete_abono(conn, abono_id_sel)
                             st.success("Abono eliminado.")
-                            abonos = fetch_abonos(conn)
                             try:
                                 st.experimental_rerun()
                             except Exception:
