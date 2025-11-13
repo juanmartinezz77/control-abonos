@@ -48,42 +48,31 @@ def init_db(conn):
     ''')
     conn.commit()
 
-def seed_example_data(conn):
-    """Inserta datos de ejemplo si la base está vacía, evitando errores de integridad."""
-    c = conn.cursor()
+# ------------------ LOGIN ------------------
 
-    # Insertar casos de ejemplo si no existen
-    c.execute("SELECT COUNT(*) FROM casos")
-    if c.fetchone()[0] == 0:
-        ejemplos = [
-            ("María López", "Divorcio y liquidación de bienes", 1500.00, "Inicio", "Caso prioritario"),
-            ("Juan Pérez", "Defensa penal - audiencia preparatoria", 2500.00, "En curso", "Pago en cuotas"),
-        ]
-        c.executemany(
-            "INSERT INTO casos (cliente, descripcion, valor_acordado, etapa, observaciones) VALUES (?,?,?,?,?)",
-            ejemplos,
-        )
-        conn.commit()
+def check_password():
+    """Verifica usuario y contraseña usando .streamlit/secrets.toml"""
+    def password_entered():
+        if (
+            st.session_state["username"] in st.secrets["credentials"]
+            and st.session_state["password"]
+            == st.secrets["credentials"][st.session_state["username"]]
+        ):
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
 
-    # Obtener IDs de los casos creados o existentes
-    c.execute("SELECT id, cliente FROM casos")
-    casos = {row[1]: row[0] for row in c.fetchall()}
+    if "password_correct" not in st.session_state:
+        st.text_input("👤 Usuario", key="username")
+        st.text_input("🔒 Contraseña", type="password", key="password", on_change=password_entered)
+        st.stop()
 
-    # Solo insertar abonos si aún no existen
-    c.execute("SELECT COUNT(*) FROM abonos")
-    if c.fetchone()[0] == 0 and len(casos) >= 2:
-        hoy = datetime.now().strftime("%Y-%m-%d")
-        abonos = [
-            (hoy, 500.00, casos.get("María López"), "Primer abono - María"),
-            (hoy, 300.00, casos.get("María López"), "Segundo abono - María"),
-            (hoy, 1000.00, casos.get("Juan Pérez"), "Primer abono - Juan"),
-        ]
-        abonos = [a for a in abonos if a[2] is not None]
-        c.executemany(
-            "INSERT INTO abonos (fecha, monto, caso_id, observaciones) VALUES (?,?,?,?)",
-            abonos,
-        )
-        conn.commit()
+    elif not st.session_state["password_correct"]:
+        st.text_input("👤 Usuario", key="username")
+        st.text_input("🔒 Contraseña", type="password", key="password", on_change=password_entered)
+        st.error("❌ Usuario o contraseña incorrectos")
+        st.stop()
 
 # ------------------ CRUD HELPERS ------------------
 
@@ -229,6 +218,8 @@ def show_error(msg):
 
 def main():
     st.set_page_config(page_title="Control de Abonos - Dashboard", layout="wide")
+    check_password()  # 🔐 Login obligatorio al inicio
+
     st.markdown("""
         <style>
             .big-title { font-size:32px; font-weight:700; color:#0b3d91; }
@@ -245,161 +236,78 @@ def main():
 
     conn = get_connection()
     init_db(conn)
-# seed_example_data(conn)  # ← desactivado: no se insertan ejemplos
-
 
     tab_casos, tab_abonos, tab_resumen, tab_reportes = st.tabs(["Casos", "Abonos", "Resumen", "Reportes"])
 
-    # ------------------ CASOS TAB ------------------
+    # ------------------ TAB CASOS ------------------
     with tab_casos:
-        st.header("Gestión de Casos")
-        col_left, col_right = st.columns([1, 1.2])
+        st.subheader("📁 Gestión de Casos")
+        with st.form("nuevo_caso_form"):
+            cliente = st.text_input("Cliente")
+            descripcion = st.text_input("Descripción del Caso")
+            valor_acordado = st.number_input("Valor acordado", min_value=0.0)
+            etapa = st.text_input("Etapa")
+            observaciones = st.text_area("Observaciones")
+            if st.form_submit_button("Agregar Caso"):
+                if cliente:
+                    try:
+                        add_caso(conn, cliente, descripcion, valor_acordado, etapa, observaciones)
+                        show_success("Caso agregado correctamente.")
+                    except ValueError as e:
+                        show_error(str(e))
+                else:
+                    show_error("El nombre del cliente es obligatorio.")
 
-        with col_left:
-            st.subheader("Agregar nuevo caso")
-            with st.form("form_nuevo_caso", clear_on_submit=True):
-                cliente = st.text_input("Cliente")
-                descripcion = st.text_area("Descripción", height=120)
-                valor_acordado = st.number_input("Valor acordado (USD)", min_value=0.0, format="%.2f")
-                etapa = st.selectbox("Etapa", ["Inicio", "En curso", "Finalizado", "Archivo"])
-                observaciones = st.text_area("Observaciones", height=80)
-                if st.form_submit_button("Guardar caso"):
-                    if not cliente.strip():
-                        st.warning("El campo 'Cliente' es obligatorio.")
-                    else:
-                        try:
-                            cid = add_caso(conn, cliente.strip(), descripcion.strip(), float(valor_acordado), etapa, observaciones.strip())
-                            show_success(f"Caso creado con ID {cid}.")
-                        except Exception as e:
-                            show_error(f"Error al crear el caso: {e}")
+        casos_df = fetch_casos(conn)
+        if not casos_df.empty:
+            st.dataframe(casos_df, use_container_width=True)
+            eliminar = st.number_input("ID de caso a eliminar", min_value=0, step=1)
+            if st.button("Eliminar caso"):
+                delete_caso(conn, eliminar)
+                show_success("Caso eliminado.")
 
-        with col_right:
-            st.subheader("Editar o eliminar casos")
-            df_casos = fetch_casos(conn)
-            if df_casos.empty:
-                st.info("No hay casos registrados.")
-            else:
-                casos_map = {f"{r['id']} — {r['cliente']} ({r['etapa']})": r['id'] for _, r in df_casos.iterrows()}
-                seleccionado = st.selectbox("Seleccionar caso", list(casos_map.keys()))
-                caso_id = casos_map[seleccionado]
-                casor = conn.execute("SELECT * FROM casos WHERE id = ?", (caso_id,)).fetchone()
-                if casor:
-                    with st.form("form_editar_caso"):
-                        e_cliente = st.text_input("Cliente", casor["cliente"])
-                        e_descripcion = st.text_area("Descripción", casor["descripcion"] or "", height=120)
-                        e_valor = st.number_input("Valor acordado (USD)", min_value=0.0, format="%.2f", value=float(casor["valor_acordado"]))
-                        e_etapa = st.selectbox("Etapa", ["Inicio", "En curso", "Finalizado", "Archivo"], index=["Inicio","En curso","Finalizado","Archivo"].index(casor["etapa"]))
-                        e_observ = st.text_area("Observaciones", casor["observaciones"] or "", height=80)
-                        col_a, col_b = st.columns(2)
-                        with col_a:
-                            if st.form_submit_button("Guardar cambios"):
-                                try:
-                                    edit_caso(conn, caso_id, e_cliente.strip(), e_descripcion.strip(), float(e_valor), e_etapa, e_observ.strip())
-                                    show_success("Caso actualizado correctamente.")
-                                except Exception as e:
-                                    show_error(f"Error al actualizar: {e}")
-                        with col_b:
-                            if st.form_submit_button("Eliminar caso"):
-                                delete_caso(conn, caso_id)
-                                show_success(f"Caso {caso_id} y sus abonos eliminados.")
-
-    # ------------------ ABONOS TAB ------------------
+    # ------------------ TAB ABONOS ------------------
     with tab_abonos:
-        st.header("Registrar y administrar abonos")
-        col_a, col_b = st.columns([1, 1.4])
-        with col_a:
-            st.subheader("Registrar nuevo abono")
-            casos_df = fetch_casos(conn)
-            if casos_df.empty:
-                st.info("No hay casos para asociar. Crea un caso primero.")
-            else:
-                with st.form("form_nuevo_abono", clear_on_submit=True):
-                    f_fecha = st.date_input("Fecha", value=date.today())
-                    f_monto = st.number_input("Monto (USD)", min_value=0.01, format="%.2f")
-                    opciones = {f"{r['id']} — {r['cliente']}": r['id'] for _, r in casos_df.iterrows()}
-                    f_caso_sel = st.selectbox("Caso asociado", list(opciones.keys()))
-                    f_observ = st.text_area("Observaciones", height=80)
-                    if st.form_submit_button("Registrar abono"):
-                        try:
-                            add_abono(conn, f_fecha.strftime("%Y-%m-%d"), float(f_monto), opciones[f_caso_sel], f_observ.strip())
-                            show_success("Abono registrado correctamente.")
-                        except Exception as e:
-                            show_error(f"Error al registrar abono: {e}")
+        st.subheader("💰 Registro de Abonos")
+        casos = fetch_casos(conn)
+        if casos.empty:
+            st.info("Primero debes registrar al menos un caso.")
+        else:
+            with st.form("nuevo_abono_form"):
+                caso = st.selectbox("Selecciona Caso", casos["descripcion"])
+                fecha = st.date_input("Fecha", value=date.today())
+                monto = st.number_input("Monto", min_value=0.0)
+                observaciones = st.text_area("Observaciones")
+                if st.form_submit_button("Agregar Abono"):
+                    caso_id = casos.loc[casos["descripcion"] == caso, "id"].iloc[0]
+                    add_abono(conn, fecha.isoformat(), monto, caso_id, observaciones)
+                    show_success("Abono agregado correctamente.")
 
-        with col_b:
-            st.subheader("Últimos abonos (editar / eliminar)")
-            df_abonos = fetch_abonos(conn)
-            if df_abonos.empty:
-                st.info("Aún no hay abonos registrados.")
-            else:
-                df_abonos["fecha"] = pd.to_datetime(df_abonos["fecha"]).dt.date
-                df_abonos["label"] = df_abonos.apply(lambda r: f'{r["id"]} — {r["cliente"]} — {r["fecha"]} — {money(r["monto"])}', axis=1)
-                ab_map = {r["label"]: int(r["id"]) for _, r in df_abonos.iterrows()}
-                sel_ab_label = st.selectbox("Seleccionar abono", list(ab_map.keys()))
-                ab_id = ab_map[sel_ab_label]
-                row = conn.execute("SELECT * FROM abonos WHERE id = ?", (ab_id,)).fetchone()
-                if row:
-                    with st.form("form_editar_abono"):
-                        a_fecha = st.date_input("Fecha", value=pd.to_datetime(row["fecha"]).date())
-                        a_monto = st.number_input("Monto (USD)", min_value=0.01, format="%.2f", value=float(row["monto"]))
-                        casos_for_ab = fetch_casos(conn)
-                        options_ab = {f"{r['id']} — {r['cliente']}": r['id'] for _, r in casos_for_ab.iterrows()}
-                        current_label = [k for k,v in options_ab.items() if v == row["caso_id"]]
-                        a_caso_sel = st.selectbox("Caso asociado", list(options_ab.keys()), index=list(options_ab.keys()).index(current_label[0]) if current_label else 0)
-                        a_observ = st.text_area("Observaciones", row["observaciones"] or "", height=80)
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            if st.form_submit_button("Guardar cambios"):
-                                try:
-                                    edit_abono(conn, ab_id, a_fecha.strftime("%Y-%m-%d"), float(a_monto), options_ab[a_caso_sel], a_observ.strip())
-                                    show_success("Abono actualizado.")
-                                except Exception as e:
-                                    show_error(f"Error actualizando abono: {e}")
-                        with c2:
-                            if st.form_submit_button("Eliminar abono"):
-                                delete_abono(conn, ab_id)
-                                show_success(f"Abono {ab_id} eliminado.")
+            abonos_df = fetch_abonos(conn)
+            if not abonos_df.empty:
+                st.dataframe(abonos_df, use_container_width=True)
 
-    # ------------------ RESUMEN TAB ------------------
+    # ------------------ TAB RESUMEN ------------------
     with tab_resumen:
-        st.header("Resumen financiero por caso")
-        colf1, colf2, colf3 = st.columns([2,2,1])
-        cliente_filter = colf1.selectbox("Filtrar por cliente", [""] + [r[0] for r in conn.execute("SELECT DISTINCT cliente FROM casos").fetchall()])
-        etapa_filter = colf2.selectbox("Filtrar por etapa", [""] + [r[0] for r in conn.execute("SELECT DISTINCT etapa FROM casos").fetchall()])
-        incluir_finalizados = colf3.checkbox("Incluir finalizados/archivo", value=True)
+        st.subheader("📊 Resumen por Caso")
+        resumen_df = resumen_por_caso(conn)
+        if not resumen_df.empty:
+            resumen_df["valor_acordado"] = resumen_df["valor_acordado"].apply(money)
+            resumen_df["total_abonado"] = resumen_df["total_abonado"].apply(money)
+            resumen_df["saldo_pendiente"] = resumen_df["saldo_pendiente"].apply(money)
+            st.dataframe(resumen_df, use_container_width=True)
+        else:
+            st.info("No hay datos disponibles.")
 
-        df_resumen = resumen_por_caso(conn, cliente_filter or None, etapa_filter or None)
-        if not incluir_finalizados:
-            df_resumen = df_resumen[~df_resumen["etapa"].isin(["Finalizado","Archivo"])]
-
-        total_valor = df_resumen["valor_acordado"].sum()
-        total_abonado = df_resumen["total_abonado"].sum()
-        total_saldo = df_resumen["saldo_pendiente"].sum()
-
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Valor total acordado", money(total_valor))
-        m2.metric("Total abonado", money(total_abonado))
-        m3.metric("Saldo pendiente", money(total_saldo))
-
-        st.dataframe(df_resumen, use_container_width=True)
-        csv_bytes = to_csv_bytes(df_resumen)
-        excel_bytes = to_excel_bytes(df_resumen)
-
-        st.download_button("📄 Descargar CSV", csv_bytes, "resumen_casos.csv", "text/csv")
-        st.download_button("📘 Descargar Excel", excel_bytes, "resumen_casos.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    # ------------------ REPORTES ------------------
+    # ------------------ TAB REPORTES ------------------
     with tab_reportes:
-        st.header("Reportes generales")
-        total_casos = conn.execute("SELECT COUNT(*) FROM casos").fetchone()[0]
-        total_abonos = conn.execute("SELECT COUNT(*) FROM abonos").fetchone()[0]
-        total_monto_abonos = conn.execute("SELECT SUM(monto) FROM abonos").fetchone()[0] or 0
-        st.markdown(f"""
-        **Casos registrados:** {total_casos}  
-        **Abonos registrados:** {total_abonos}  
-        **Monto total abonado:** {money(total_monto_abonos)}
-        """)
-        st.info("Este módulo mostrará en el futuro gráficos e informes comparativos.")
+        st.subheader("📑 Exportar Reportes")
+        df = resumen_por_caso(conn)
+        if not df.empty:
+            st.download_button("⬇️ Exportar a CSV", data=to_csv_bytes(df), file_name="resumen_abonos.csv", mime="text/csv")
+            st.download_button("⬇️ Exportar a Excel", data=to_excel_bytes(df), file_name="resumen_abonos.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        else:
+            st.info("No hay datos para exportar.")
 
 if __name__ == "__main__":
     main()
