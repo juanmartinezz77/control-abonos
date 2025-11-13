@@ -198,6 +198,32 @@ def main():
     if "logged_in" not in st.session_state:
         st.session_state["logged_in"] = False
 
+    # ------------------ DEBUG TEMPORAL ------------------
+    # Botón para inspeccionar st.secrets["credentials"] sin revelar contraseñas en claro.
+    # Borra o comenta este bloque en producción.
+    if st.button("DEBUG: Mostrar estado de secretos (temporal)"):
+        creds = st.secrets.get("credentials", None)
+        if creds is None:
+            st.warning("No se encontró 'credentials' en st.secrets.")
+        else:
+            st.write("Tipo de st.secrets['credentials']:", type(creds).__name__)
+            try:
+                keys = list(creds.keys()) if hasattr(creds, "keys") else None
+            except Exception as e:
+                keys = None
+                st.write("Error al listar claves:", e)
+            st.write("Claves de usuario encontradas:", keys)
+            if keys:
+                first = keys[0]
+                val = creds[first]
+                if isinstance(val, dict) and "password" in val:
+                    st.info(f"Estructura detectada: credentials.{first}.password (nested)")
+                elif isinstance(val, str):
+                    st.info(f"Estructura detectada: credentials.{first} = (flat string)")
+                else:
+                    st.info(f"Estructura inesperada para credentials.{first}: {type(val).__name__}")
+        st.stop()
+
     # LOGIN robusto (acepta formato nested y plano). NO imprime contraseñas.
     if not st.session_state.get("logged_in", False):
         st.title("🔐 Acceso restringido")
