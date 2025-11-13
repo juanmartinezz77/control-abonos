@@ -49,8 +49,10 @@ def init_db(conn):
     conn.commit()
 
 def seed_example_data(conn):
-    """Inserta datos de ejemplo si la base está vacía."""
+    """Inserta datos de ejemplo si la base está vacía, evitando errores de integridad."""
     c = conn.cursor()
+
+    # Insertar casos de ejemplo si no existen
     c.execute("SELECT COUNT(*) FROM casos")
     if c.fetchone()[0] == 0:
         ejemplos = [
@@ -63,14 +65,20 @@ def seed_example_data(conn):
         )
         conn.commit()
 
+    # Obtener IDs de los casos creados o existentes
+    c.execute("SELECT id, cliente FROM casos")
+    casos = {row[1]: row[0] for row in c.fetchall()}
+
+    # Solo insertar abonos si aún no existen
     c.execute("SELECT COUNT(*) FROM abonos")
-    if c.fetchone()[0] == 0:
+    if c.fetchone()[0] == 0 and len(casos) >= 2:
         hoy = datetime.now().strftime("%Y-%m-%d")
         abonos = [
-            (hoy, 500.00, 1, "Primer abono - María"),
-            (hoy, 300.00, 1, "Segundo abono - María"),
-            (hoy, 1000.00, 2, "Primer abono - Juan"),
+            (hoy, 500.00, casos.get("María López"), "Primer abono - María"),
+            (hoy, 300.00, casos.get("María López"), "Segundo abono - María"),
+            (hoy, 1000.00, casos.get("Juan Pérez"), "Primer abono - Juan"),
         ]
+        abonos = [a for a in abonos if a[2] is not None]
         c.executemany(
             "INSERT INTO abonos (fecha, monto, caso_id, observaciones) VALUES (?,?,?,?)",
             abonos,
