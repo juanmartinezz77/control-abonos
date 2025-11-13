@@ -1,6 +1,7 @@
 import os
 import glob
 import re
+import zipfile
 import streamlit as st
 import sqlite3
 import pandas as pd
@@ -336,55 +337,70 @@ def check_password(user: str, password: str) -> bool:
     return False
 
 
-# ------------------ Admin reset (callback) ------------------
+# ------------------ Admin utilities ------------------
+
+
+def list_db_files():
+    return sorted(glob.glob("control_abonos_*.db"))
+
+
+def read_file_bytes(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def make_zip_of_files(file_paths: list[str]) -> bytes:
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        for p in file_paths:
+            try:
+                z.write(p, arcname=os.path.basename(p))
+            except Exception:
+                logging.exception("No se pudo incluir en ZIP %s", p)
+    buf.seek(0)
+    return buf.read()
+
+
+def delete_file(path: str) -> tuple[bool, str]:
+    try:
+        os.remove(path)
+        return True, ""
+    except Exception as e:
+        logging.exception("Error borrando %s", path)
+        return False, str(e)
+
+
+# ------------------ Admin callbacks ------------------
 
 
 def reset_all_databases_callback(admin_user: str, admin_pw_input: str):
-    """
-    Callback to delete control_abonos_*.db files.
-    Requires that admin_user equals the 'admin' credential key (i.e. 'admin') and admin_pw_input matches st.secrets['credentials']['admin'].
-    Stores a feedback message in st.session_state['feedback'].
-    """
     try:
-        if "credentials" not in st.secrets:
-            st.session_state["feedback"] = "No configured secrets['credentials'] found."
-            return
-        creds = st.secrets["credentials"]
-        # admin credential must exist under key 'admin' in credentials
+        creds = st.secrets.get("credentials", {})
         admin_secret = creds.get("admin") if hasattr(creds, "get") else None
-        if admin_secret is None:
-            st.session_state["feedback"] = "No admin credentials found in secrets (expected credentials.admin)."
-            return
-        # admin_secret may be string or dict
-        expected_pw = admin_secret if isinstance(admin_secret, str) else admin_secret.get("password")
-        # verify logged-in user is admin_user
-        logged = st.session_state.get("usuario")
-        if logged != admin_user:
-            st.session_state["feedback"] = "Usuario autenticado no coincide con usuario admin indicado."
-            return
+        expected_pw = admin_secret if isinstance(admin_secret, str) else admin_secret.get("password") if admin_secret else None
         if admin_pw_input != expected_pw:
             st.session_state["feedback"] = "Contraseña de administrador incorrecta."
             return
+        if st.session_state.get("usuario") != admin_user:
+            st.session_state["feedback"] = "Usuario autenticado no coincide con admin."
+            return
 
-        pattern = "control_abonos_*.db"
-        files = glob.glob(pattern)
+        files = list_db_files()
         if not files:
             st.session_state["feedback"] = "No se encontraron bases de datos para borrar."
             return
         deleted = []
         failed = []
         for f in files:
-            try:
-                os.remove(f)
+            ok, err = delete_file(f)
+            if ok:
                 deleted.append(f)
-            except Exception as e:
-                logging.exception("No se pudo borrar %s", f)
-                failed.append((f, str(e)))
+            else:
+                failed.append((f, err))
         msg = f"Borrados: {len(deleted)} archivos."
         if failed:
             msg += f" Fallos: {len(failed)}."
         st.session_state["feedback"] = msg
-        # try to rerun so UI shows updated empty DBs
         try:
             st.experimental_rerun()
         except Exception:
@@ -392,6 +408,96 @@ def reset_all_databases_callback(admin_user: str, admin_pw_input: str):
     except Exception as e:
         logging.exception("Error en reset_all_databases_callback")
         st.session_state["feedback"] = f"Error al borrar bases: {e}"
+
+
+def delete_db_callback(path: str):
+    try:
+        # validate admin
+        creds = st.secrets.get("credentials", {})
+        admin_secret = creds.get("admin") if hasattr(creds, "get") else None
+        expected_pw = admin_secret if isinstance(admin_secret, str) else admin_secret.get("password") if admin_secret else None
+        provided = st.session_state.get("admin_reset_pw_ui", "")
+        if provided != expected_pw:
+            st.session_state["feedback"] = "Contraseña de administrador incorrecta."
+            return
+        if st.session_state.get("usuario") != "admin":
+            st.session_state["feedback"] = "Sólo admin puede borrar DBs."
+            return
+        ok, err = delete_file(path)
+        if ok:
+            st.session_state["feedback"] = f"Borrado: {os.path.basename(path)}"
+        else:
+            st.session_state["feedback"] = f"Error al borrar {os.path.basename(path)}: {err}"
+        try:
+            st.experimental_rerun()
+        except Exception:
+            pass
+    except Exception as e:
+        logging.exception("Error deleting db callback")
+        st.session_state["feedback"] = f"Error: {e}"
+
+
+def download_db_to_session(path: str, key: str):
+    try:
+        b = read_file_bytes(path)
+        st.session_state[key] = b
+    except Exception as e:
+        logging.exception("Error leyendo archivo %s", path)
+        st.session_state["feedback"] = f"Error al preparar descarga: {e}"
+
+
+def generate_zip_all_callback():
+    try:
+        creds = st.secrets.get("credentials", {})
+        admin_secret = creds.get("admin") if hasattr(creds, "get") else None
+        expected_pw = admin_secret if isinstance(admin_secret, str) else admin_secret.get("password") if admin_secret else None
+        provided = st.session_state.get("admin_reset_pw_ui", "")
+        if provided != expected_pw:
+            st.session_state["feedback"] = "Contraseña de administrador incorrecta."
+            return
+        if st.session_state.get("usuario") != "admin":
+            st.session_state["feedback"] = "Sólo admin puede generar backups."
+            return
+        files = list_db_files()
+        if not files:
+            st.session_state["feedback"] = "No se encontraron bases de datos para archivar."
+            return
+        zip_bytes = make_zip_of_files(files)
+        st.session_state["zip_all_bytes"] = zip_bytes
+        st.session_state["feedback"] = f"ZIP listo ({len(files)} archivos). Usa el botón para descargar."
+    except Exception as e:
+        logging.exception("Error generando ZIP")
+        st.session_state["feedback"] = f"Error al generar ZIP: {e}"
+
+
+def delete_user_db_callback(username_input: str):
+    try:
+        creds = st.secrets.get("credentials", {})
+        admin_secret = creds.get("admin") if hasattr(creds, "get") else None
+        expected_pw = admin_secret if isinstance(admin_secret, str) else admin_secret.get("password") if admin_secret else None
+        provided = st.session_state.get("admin_reset_pw_ui", "")
+        if provided != expected_pw:
+            st.session_state["feedback"] = "Contraseña de administrador incorrecta."
+            return
+        if st.session_state.get("usuario") != "admin":
+            st.session_state["feedback"] = "Sólo admin puede borrar DBs."
+            return
+        path = get_db_path_for_user(username_input)
+        if not os.path.exists(path):
+            st.session_state["feedback"] = f"No existe la DB para usuario {username_input}."
+            return
+        ok, err = delete_file(path)
+        if ok:
+            st.session_state["feedback"] = f"DB de {username_input} borrada."
+        else:
+            st.session_state["feedback"] = f"Error borrando DB de {username_input}: {err}"
+        try:
+            st.experimental_rerun()
+        except Exception:
+            pass
+    except Exception as e:
+        logging.exception("Error delete_user_db_callback")
+        st.session_state["feedback"] = f"Error: {e}"
 
 
 # ------------------ Callbacks for on_click (safe for session_state modifications) ------------------
@@ -689,18 +795,57 @@ def main():
             st.download_button("⬇️ Exportar Resumen a CSV", data=to_csv_bytes(resumen_df), file_name="resumen_abonos.csv", mime="text/csv")
             st.download_button("⬇️ Exportar Resumen a Excel", data=to_excel_bytes(resumen_df), file_name="resumen_abonos.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-    # ---------- ADMIN (RESET ALL DBs) ----------
-    # Show admin expander only if there is an 'admin' credential and the logged user equals 'admin'
+    # ---------- ADMIN (RESET / BACKUP / DOWNLOAD / DELETE per user) ----------
     creds = st.secrets.get("credentials", {}) if "credentials" in st.secrets else {}
+    # show admin controls only when 'admin' credential exists and logged user is admin
     if "admin" in creds and usuario == "admin":
-        with st.expander("⚠️ Administración (borrar todos los datos)", expanded=False):
-            st.write("Aquí puedes borrar todas las bases de datos de usuarios. Haz backup antes usando los botones de exportación.")
-            st.markdown("**ATENCIÓN:** Esta acción es irreversible.")
+        with st.expander("⚠️ Administración (backup / borrar DBs)", expanded=False):
+            st.write("Operaciones administrativas: backup, descargar y borrar DBs. Haz backup antes de borrar.")
+            st.markdown("**ATENCIÓN:** Acciones destructivas son irreversibles.")
+            # admin password confirmation input (shared for actions)
+            st.text("Confirma con la contraseña de admin para ejecutar acciones:")
+            st.text_input("Contraseña admin", type="password", key="admin_reset_pw_ui")
+
+            # List DB files
+            st.markdown("#### Bases de datos existentes")
+            dbs = list_db_files()
+            if not dbs:
+                st.info("No hay bases de datos (control_abonos_*.db) en el servidor.")
+            else:
+                for p in dbs:
+                    base = os.path.basename(p)
+                    cols = st.columns([3, 1, 1])
+                    cols[0].write(base)
+                    # prepare download to session and show download button
+                    dl_key = f"dl_{base}"
+                    if cols[1].button("Preparar descarga", key=f"prep_{base}"):
+                        download_db_to_session(p, dl_key)
+                        st.session_state["feedback"] = f"Archivo {base} listo para descarga."
+                    if dl_key in st.session_state and st.session_state[dl_key]:
+                        cols[1].download_button("Descargar .db", data=st.session_state[dl_key], file_name=base, mime="application/x-sqlite3")
+                    # Delete button (requires admin pw field filled)
+                    if cols[2].button("Borrar", key=f"del_btn_{base}"):
+                        delete_db_callback(p)
+
+            st.markdown("---")
+            # Delete DB by username
+            st.markdown("#### Borrar DB de un usuario específico")
+            user_to_delete = st.text_input("Usuario (ej. JuanMartinez)", key="admin_delete_user_input")
+            if st.button("Borrar DB de ese usuario", key="btn_delete_user"):
+                delete_user_db_callback(user_to_delete)
+
+            st.markdown("---")
+            # Zip / download all DBs
+            if st.button("Generar ZIP de todas las DBs (preparar)", key="btn_zip_all"):
+                generate_zip_all_callback()
+            if "zip_all_bytes" in st.session_state and st.session_state["zip_all_bytes"]:
+                st.download_button("⬇️ Descargar ZIP con todas las DBs", data=st.session_state["zip_all_bytes"], file_name="backup_all_dbs.zip", mime="application/zip")
+
+            st.markdown("---")
+            # Reset all DBs (destructivo)
             confirm_chk = st.checkbox("Sí, confirmo que deseo borrar TODAS las bases de datos", key="confirm_reset_all_ui")
-            admin_pw_input = st.text_input("Introduce contraseña de administrador para confirmar", type="password", key="admin_reset_pw_ui")
-            # The callback will validate the admin credentials against st.secrets['credentials']['admin']
-            if st.button("Borrar TODAS las bases de datos (IRREVERSIBLE)", disabled=(not confirm_chk or admin_pw_input == ""), key="btn_reset_all_ui"):
-                reset_all_databases_callback(usuario, admin_pw_input)
+            if st.button("Borrar TODAS las bases de datos (IRREVERSIBLE)", disabled=(not confirm_chk), key="btn_reset_all_ui"):
+                reset_all_databases_callback(usuario, st.session_state.get("admin_reset_pw_ui", ""))
 
     # ---------- REPORTES ----------
     with tab_reportes:
