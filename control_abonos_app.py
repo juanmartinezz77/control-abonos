@@ -3,17 +3,17 @@ import sqlite3
 import pandas as pd
 import logging
 from io import BytesIO
-from datetime import date
+from datetime import date, datetime
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 
 DB_PATH = "control_abonos.db"
 
-# ------------------ Logging ------------------
+# ------------------ Logging (no file handlers in prod) ------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[logging.FileHandler("app.log"), logging.StreamHandler()],
+    handlers=[logging.StreamHandler()],
 )
 
 # ------------------ DATABASE HELPERS ------------------
@@ -64,6 +64,26 @@ def init_db(conn):
         """
     )
     conn.commit()
+    # Asegurar columnas de auditoría (creado_por) para compatibilidad retroactiva
+    ensure_column(conn, "casos", "creado_por", "TEXT")
+    ensure_column(conn, "abonos", "creado_por", "TEXT")
+
+
+def ensure_column(conn, table: str, column: str, col_type: str):
+    """
+    Añade una columna si no existe (ALTER TABLE ADD COLUMN).
+    """
+    c = conn.cursor()
+    info = c.execute(f"PRAGMA table_info({table})").fetchall()
+    columns = [row[1] for row in info]
+    if column not in columns:
+        try:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+            conn.commit()
+            logging.info("Added column %s to %s", column, table)
+        except Exception:
+            # Si algo falla, lo logueamos pero no detenemos la app.
+            logging.exception("No se pudo añadir la columna %s a %s", column, table)
 
 
 # ------------------ CRUD HELPERS ------------------
@@ -95,7 +115,7 @@ def fetch_abonos(conn, caso_id=None):
     return pd.read_sql_query(q, conn, params=params)
 
 
-def add_caso(conn, cliente, descripcion, valor_acordado, etapa, observaciones):
+def add_caso(conn, cliente, descripcion, valor_acordado, etapa, observaciones, creado_por=None):
     if not cliente or str(cliente).strip() == "":
         raise ValueError("El nombre del cliente es obligatorio.")
     c = conn.cursor()
@@ -103,11 +123,11 @@ def add_caso(conn, cliente, descripcion, valor_acordado, etapa, observaciones):
     if c.fetchone()[0] > 0:
         raise ValueError("Ya existe un caso con ese cliente y descripción.")
     c.execute(
-        "INSERT INTO casos (cliente, descripcion, valor_acordado, etapa, observaciones) VALUES (?,?,?,?,?)",
-        (cliente.strip(), descripcion, float(valor_acordado or 0), etapa, observaciones),
+        "INSERT INTO casos (cliente, descripcion, valor_acordado, etapa, observaciones, creado_en, creado_por) VALUES (?,?,?,?,?,?,?)",
+        (cliente.strip(), descripcion, float(valor_acordado or 0), etapa, observaciones, datetime.utcnow().date().isoformat(), creado_por),
     )
     conn.commit()
-    logging.info("Caso agregado: %s - %s", cliente, descripcion)
+    logging.info("Caso agregado: %s - %s (por %s)", cliente, descripcion, creado_por)
     return c.lastrowid
 
 
@@ -130,7 +150,7 @@ def delete_caso(conn, caso_id):
     logging.info("Caso eliminado id=%s", caso_id)
 
 
-def add_abono(conn, fecha, monto, caso_id, observaciones):
+def add_abono(conn, fecha, monto, caso_id, observaciones, creado_por=None):
     """
     Valida existencia de caso e inserta el abono.
     Lanza ValueError para validaciones de usuario.
@@ -153,11 +173,11 @@ def add_abono(conn, fecha, monto, caso_id, observaciones):
         raise ValueError("El monto debe ser mayor que cero.")
 
     c.execute(
-        "INSERT INTO abonos (fecha, monto, caso_id, observaciones) VALUES (?,?,?,?)",
-        (fecha, monto_val, caso_id_int, observaciones),
+        "INSERT INTO abonos (fecha, monto, caso_id, observaciones, creado_en, creado_por) VALUES (?,?,?,?,?,?)",
+        (fecha, monto_val, caso_id_int, observaciones, datetime.utcnow().isoformat(), creado_por),
     )
     conn.commit()
-    logging.info("Abono agregado: caso_id=%s monto=%s fecha=%s", caso_id_int, monto_val, fecha)
+    logging.info("Abono agregado: caso_id=%s monto=%s fecha=%s por=%s", caso_id_int, monto_val, fecha, creado_por)
     return c.lastrowid
 
 
@@ -186,7 +206,6 @@ def resumen_por_caso(conn, cliente_filter=None, etapa_filter=None):
     """
     Devuelve un DataFrame con columnas:
     id, cliente, descripcion, valor_acordado, total_abonado, saldo_pendiente, etapa, observaciones
-    Aplica filtros por cliente y etapa si se pasan (usar "Todos" para no filtrar).
     """
     casos = fetch_casos(conn, cliente_filter, etapa_filter)
     if casos.empty:
@@ -206,11 +225,9 @@ def resumen_por_caso(conn, cliente_filter=None, etapa_filter=None):
     merged = casos.merge(abonos, left_on="id", right_on="caso_id", how="left")
     merged["total_abonado"] = merged["total_abonado"].fillna(0.0)
     merged["saldo_pendiente"] = merged["valor_acordado"] - merged["total_abonado"]
-    # Seleccionar y ordenar columnas
     result = merged[
         ["id", "cliente", "descripcion", "valor_acordado", "total_abonado", "saldo_pendiente", "etapa", "observaciones"]
     ].copy()
-    # Asegurar tipos numéricos
     result["valor_acordado"] = result["valor_acordado"].astype(float)
     result["total_abonado"] = result["total_abonado"].astype(float)
     result["saldo_pendiente"] = result["saldo_pendiente"].astype(float)
@@ -233,24 +250,20 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
         thin = Side(border_style="thin", color="AAAAAA")
         border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-        # Stylize header
         for cell in ws[1]:
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = header_alignment
 
-        # Borders and alignment
         for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
             for cell in row:
                 cell.border = border
                 cell.alignment = Alignment(vertical="center")
 
-        # Autosize columns
         for column_cells in ws.columns:
             length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in column_cells)
             ws.column_dimensions[get_column_letter(column_cells[0].column)].width = min(length + 4, 60)
 
-        # Numeric formatting
         for col in ws.iter_cols(min_row=2, max_row=ws.max_row):
             if all((isinstance(c.value, (int, float)) or c.value is None) for c in col):
                 for cell in col:
@@ -275,27 +288,25 @@ def money(v):
 
 def check_password(user: str, password: str) -> bool:
     """
-    Comprueba credenciales en st.secrets de forma robusta (soporta AttrDict/dict/flat).
-    Devuelve True si coincide.
+    Comprueba credenciales en st.secrets (solo lectura). No existe fallback local en producción.
     """
-    creds = st.secrets.get("credentials", None)
-    if creds is None:
-        # Fallback local para desarrollo (evitar en producción)
-        return (user == "admin" and password == "1234")
+    if "credentials" not in st.secrets:
+        # En producción queremos que esté configurado correctamente
+        st.error("No se encontraron credenciales en la configuración de secretos. Configura st.secrets['credentials'].")
+        return False
 
+    creds = st.secrets["credentials"]
     stored = None
     try:
         if hasattr(creds, "__contains__") and user in creds:
             stored = creds[user]
     except Exception:
         stored = None
-
     if stored is None:
         try:
             stored = getattr(creds, user)
         except Exception:
             stored = None
-
     if stored is None and hasattr(creds, "get"):
         try:
             stored = creds.get(user)
@@ -304,7 +315,6 @@ def check_password(user: str, password: str) -> bool:
 
     if isinstance(stored, str):
         return password == stored
-
     if stored is not None:
         try:
             if hasattr(stored, "get"):
@@ -319,7 +329,6 @@ def check_password(user: str, password: str) -> bool:
                 return pw == password
         except Exception:
             pass
-
     return False
 
 
@@ -335,13 +344,15 @@ def main():
         st.session_state["logged_in"] = False
         st.session_state["usuario"] = None
 
-    # --------- LOGIN ----------
+    # LOGIN (sin fallback)
     if not st.session_state["logged_in"]:
         st.title("🔐 Acceso")
+        if "credentials" not in st.secrets:
+            st.error("Aplicación no configurada: falta la sección [credentials] en los secretos. Añade usuarios en secrets.")
+            st.stop()
         user = st.text_input("Usuario")
         password = st.text_input("Contraseña", type="password")
-        login_clicked = st.button("Iniciar sesión")
-        if login_clicked:
+        if st.button("Iniciar sesión"):
             if check_password(user, password):
                 st.session_state["logged_in"] = True
                 st.session_state["usuario"] = user
@@ -370,7 +381,7 @@ def main():
         st.button("Cerrar sesión", on_click=lambda: logout())
     with col2:
         st.markdown('<div class="big-title">⚖️ Control de Abonos — Dashboard</div>', unsafe_allow_html=True)
-        st.markdown('<div class="subtle">Gestión de casos, registro de abonos y reportes.</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="subtle">Conectado como: {st.session_state.get("usuario")}</div>', unsafe_allow_html=True)
 
     st.write("---")
 
@@ -383,12 +394,11 @@ def main():
     # ------------------ TAB CASOS ------------------
     with tab_casos:
         st.subheader("📁 Casos")
-        st.markdown("Agregar o editar casos. Si editas, selecciona el caso y modifica los campos.")
+        st.markdown("Agregar o editar casos. El campo 'Valor acordado' tiene step=100 para facilitar entrada rápida.")
         with st.form("form_caso_nuevo"):
             col_a, col_b = st.columns(2)
             with col_a:
                 cliente = st.text_input("Cliente", key="cliente_new")
-                # step 100 para incrementar/decrementar de 100 en 100
                 valor_acordado = st.number_input("Valor acordado", min_value=0.0, step=100.0, format="%.2f", key="valor_new")
             with col_b:
                 descripcion = st.text_input("Descripción", key="desc_new")
@@ -396,7 +406,7 @@ def main():
             observaciones = st.text_area("Observaciones", key="obs_new")
             if st.form_submit_button("Agregar Caso"):
                 try:
-                    add_caso(conn, cliente, descripcion, valor_acordado, etapa, observaciones)
+                    add_caso(conn, cliente, descripcion, valor_acordado, etapa, observaciones, creado_por=st.session_state.get("usuario"))
                     st.success("Caso agregado correctamente.")
                 except ValueError as e:
                     st.error(str(e))
@@ -409,7 +419,6 @@ def main():
             st.markdown("### Lista de casos")
             st.dataframe(casos_now, width="stretch")
 
-            # Editar caso
             st.markdown("#### Editar / Eliminar caso")
             opciones_casos = [(int(r["id"]), f"{r['id']} — {r['cliente']} — {r['descripcion'] or ''}") for _, r in casos_now.iterrows()]
             seleccionado = st.selectbox("Selecciona caso", options=opciones_casos, format_func=lambda x: x[1])
@@ -430,7 +439,6 @@ def main():
                     except Exception:
                         logging.exception("Error editando caso")
                         st.error("Error al actualizar el caso. Revisa los logs.")
-                # Eliminación: requiere marcar confirmación y pulsar el botón
                 confirm_key = f"confirm_delete_case_{caso_id_sel}"
                 confirm_delete = st.checkbox("Marcar para confirmar eliminación del caso seleccionado", key=confirm_key)
                 if btns[1].form_submit_button("Eliminar caso"):
@@ -458,12 +466,11 @@ def main():
                 caso_sel = st.selectbox("Selecciona Caso", options=opciones, format_func=lambda x: x[1])
                 caso_id_seleccionado = caso_sel[0] if isinstance(caso_sel, tuple) else caso_sel
                 fecha = st.date_input("Fecha", value=date.today())
-                # step 100 para incrementar/decrementar de 100 en 100
                 monto = st.number_input("Monto", min_value=0.0, step=100.0, format="%.2f")
                 observaciones = st.text_area("Observaciones")
                 if st.form_submit_button("Agregar Abono"):
                     try:
-                        add_abono(conn, fecha.isoformat(), monto, caso_id_seleccionado, observaciones)
+                        add_abono(conn, fecha.isoformat(), monto, caso_id_seleccionado, observaciones, creado_por=st.session_state.get("usuario"))
                         st.success("Abono agregado correctamente.")
                     except ValueError as e:
                         st.error(str(e))
@@ -474,13 +481,11 @@ def main():
                         logging.exception("Error inesperado al insertar abono")
                         st.error("Ocurrió un error inesperado. Revisa los logs.")
 
-        # Mostrar abonos
         abonos = fetch_abonos(conn)
         if not abonos.empty:
             st.markdown("### Últimos abonos")
             st.dataframe(abonos, width="stretch")
 
-            # Editar / Eliminar abono
             st.markdown("#### Editar / Eliminar abono")
             opciones_abonos = [(int(r["id"]), f"{r['id']} — {r['cliente']} — {r['fecha']} — ${float(r['monto']):,.2f}") for _, r in abonos.iterrows()]
             elegido = st.selectbox("Selecciona abono", options=opciones_abonos, format_func=lambda x: x[1])
@@ -488,7 +493,6 @@ def main():
 
             with st.form("form_abono_edit"):
                 a_row = abonos.loc[abonos["id"] == abono_id_sel].iloc[0]
-                # caso selection: reuse opciones
                 caso_index = [o[0] for o in opciones].index(int(a_row["caso_id"])) if opciones else 0
                 caso_for_edit = st.selectbox("Caso (editar)", options=opciones, format_func=lambda x: x[1], index=caso_index)
                 fecha_e = st.date_input("Fecha", value=pd.to_datetime(a_row["fecha"]).date(), key="fecha_edit")
@@ -502,7 +506,6 @@ def main():
                     except Exception:
                         logging.exception("Error editando abono")
                         st.error("Error al actualizar el abono. Revisa los logs.")
-                # Eliminación abono (requerir confirmación)
                 confirm_key_ab = f"confirm_delete_abono_{abono_id_sel}"
                 confirm_delete_ab = st.checkbox("Marcar para confirmar eliminación del abono seleccionado", key=confirm_key_ab)
                 if btns_ab[1].form_submit_button("Eliminar abono"):
@@ -520,8 +523,9 @@ def main():
     with tab_resumen:
         st.subheader("📊 Resumen por Caso")
         # Filtros
-        clientes = ["Todos"] + sorted(list(fetch_casos(conn)["cliente"].dropna().unique())) if not fetch_casos(conn).empty else ["Todos"]
-        etapas = ["Todos"] + sorted(list(fetch_casos(conn)["etapa"].fillna("").unique()))
+        casos_all = fetch_casos(conn)
+        clientes = ["Todos"] + sorted(list(casos_all["cliente"].dropna().unique())) if not casos_all.empty else ["Todos"]
+        etapas = ["Todos"] + sorted(list(casos_all["etapa"].fillna("").unique()))
         cliente_filter = st.selectbox("Filtrar por cliente", clientes)
         etapa_filter = st.selectbox("Filtrar por etapa", etapas)
 
@@ -539,12 +543,22 @@ def main():
             colB.metric("Total abonado", money(total_abonado))
             colC.metric("Total saldo pendiente", money(total_pendiente))
 
-            # Mostrar tabla con formato legible
+            # Añadir estado y mostrar tabla
             display = resumen_df.copy()
+            display["estado"] = display["saldo_pendiente"].apply(lambda x: "Pendiente" if x > 0.0 else "Pagado")
             display["valor_acordado"] = display["valor_acordado"].apply(money)
             display["total_abonado"] = display["total_abonado"].apply(money)
             display["saldo_pendiente"] = display["saldo_pendiente"].apply(money)
             st.dataframe(display, width="stretch")
+
+            # Gráfico de saldo pendiente por caso
+            try:
+                chart_df = resumen_df.set_index("descripcion")[["saldo_pendiente"]].sort_values("saldo_pendiente", ascending=False)
+                st.bar_chart(chart_df, height=300)
+            except Exception:
+                # si la descripción no es adecuada como índice, usar cliente
+                chart_df = resumen_df.set_index("cliente")[["saldo_pendiente"]].sort_values("saldo_pendiente", ascending=False)
+                st.bar_chart(chart_df, height=300)
 
             # Exportes (usar datos sin formatear)
             st.download_button("⬇️ Exportar Resumen a CSV", data=to_csv_bytes(resumen_df), file_name="resumen_abonos.csv", mime="text/csv")
@@ -557,7 +571,6 @@ def main():
         if df_export.empty:
             st.info("No hay datos para exportar.")
         else:
-            # Mostrar resumen global y permitir exportes
             total_acordado = df_export["valor_acordado"].sum()
             total_abonado = df_export["total_abonado"].sum()
             total_pendiente = df_export["saldo_pendiente"].sum()
@@ -580,7 +593,6 @@ def main():
 def logout():
     st.session_state["logged_in"] = False
     st.session_state["usuario"] = None
-    # Streamlit reejecuta automáticamente tras on_click
 
 
 if __name__ == "__main__":
