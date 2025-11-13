@@ -49,34 +49,6 @@ def init_db(conn):
     conn.commit()
 
 
-# ------------------ LOGIN ------------------
-
-def login():
-    """Login basado en los secrets de Streamlit Cloud (.streamlit/secrets.toml)"""
-    st.title("🔐 Inicio de sesión")
-
-    # Verificar si existen credenciales en secrets
-    if "credentials" not in st.secrets:
-        st.error("No se encontró la sección [credentials] en secrets.toml.")
-        st.stop()
-
-    credentials = st.secrets["credentials"]
-
-    username = st.text_input("👤 Usuario")
-    password = st.text_input("🔒 Contraseña", type="password")
-
-    if st.button("Entrar"):
-        # Validar usuario
-        if username in credentials and "password" in credentials[username]:
-            if password == credentials[username]["password"]:
-                st.session_state["usuario"] = username
-                st.success(f"Bienvenido, {username} 👋")
-                st.rerun()
-            else:
-                st.error("Contraseña incorrecta.")
-        else:
-            st.error("Usuario no encontrado.")
-
 # ------------------ CRUD HELPERS ------------------
 
 def fetch_casos(conn, cliente_filter=None, etapa_filter=None):
@@ -222,16 +194,39 @@ def show_error(msg):
 def main():
     st.set_page_config(page_title="Control de Abonos - Dashboard", layout="wide")
 
-    # 🔐 Login sin .streamlit/secrets.toml
+    # Initialize session state
     if "logged_in" not in st.session_state:
         st.session_state["logged_in"] = False
 
+    # LOGIN: robust handling for secrets formats (nested or flat), fallback to hardcoded credentials
     if not st.session_state["logged_in"]:
         st.title("🔐 Acceso restringido")
         user = st.text_input("👤 Usuario")
         password = st.text_input("🔒 Contraseña", type="password")
         if st.button("Iniciar sesión"):
-            if user == "admin" and password == "1234":
+            logged = False
+            # If credentials exist in secrets, try to validate
+            if "credentials" in st.secrets:
+                creds = st.secrets["credentials"]
+                stored = creds.get(user) if isinstance(creds, dict) else None
+                if stored is None:
+                    # user not found in secrets
+                    logged = False
+                else:
+                    # support nested dict style: credentials.user.password
+                    if isinstance(stored, dict) and "password" in stored:
+                        if password == stored["password"]:
+                            logged = True
+                    # support flat string style: credentials.user = "password"
+                    elif isinstance(stored, str):
+                        if password == stored:
+                            logged = True
+            else:
+                # fallback to the original hardcoded check (legacy)
+                if user == "admin" and password == "1234":
+                    logged = True
+
+            if logged:
                 st.session_state["logged_in"] = True
                 st.success("Acceso concedido ✅")
                 st.rerun()
