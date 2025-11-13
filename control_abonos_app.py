@@ -22,14 +22,13 @@ logging.basicConfig(
 def get_connection():
     """
     Devuelve una conexión SQLite con PRAGMA foreign_keys=ON.
-    Reintentos sencillos y manejo de errores.
     """
     try:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
-    except sqlite3.Error as e:
+    except sqlite3.Error:
         logging.exception("Error conectando a la DB")
         st.error("Error al conectar con la base de datos. Revisa los logs.")
         st.stop()
@@ -100,7 +99,6 @@ def add_caso(conn, cliente, descripcion, valor_acordado, etapa, observaciones):
     if not cliente or str(cliente).strip() == "":
         raise ValueError("El nombre del cliente es obligatorio.")
     c = conn.cursor()
-    # Prevención de duplicados por cliente+descripcion
     c.execute("SELECT COUNT(*) FROM casos WHERE cliente = ? AND descripcion = ?", (cliente, descripcion))
     if c.fetchone()[0] > 0:
         raise ValueError("Ya existe un caso con ese cliente y descripción.")
@@ -136,7 +134,6 @@ def add_abono(conn, fecha, monto, caso_id, observaciones):
     """
     Valida existencia de caso e inserta el abono.
     Lanza ValueError para validaciones de usuario.
-    Deja pasar sqlite3.IntegrityError (se captura en la UI si se desea).
     """
     c = conn.cursor()
     try:
@@ -144,18 +141,16 @@ def add_abono(conn, fecha, monto, caso_id, observaciones):
     except Exception:
         raise ValueError("ID de caso inválido.")
 
-    # Validar existencia
     c.execute("SELECT 1 FROM casos WHERE id = ?", (caso_id_int,))
     if c.fetchone() is None:
         raise ValueError(f"No existe el caso con id {caso_id_int}.")
 
-    # Validar monto
     try:
         monto_val = float(monto)
-        if monto_val <= 0:
-            raise ValueError("El monto debe ser mayor que cero.")
-    except ValueError as e:
-        raise ValueError("Monto inválido.") from e
+    except Exception:
+        raise ValueError("Monto inválido.")
+    if monto_val <= 0:
+        raise ValueError("El monto debe ser mayor que cero.")
 
     c.execute(
         "INSERT INTO abonos (fecha, monto, caso_id, observaciones) VALUES (?,?,?,?)",
@@ -203,24 +198,20 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
         thin = Side(border_style="thin", color="AAAAAA")
         border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-        # Stylize header
         for cell in ws[1]:
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = header_alignment
 
-        # Borders and alignment
         for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
             for cell in row:
                 cell.border = border
                 cell.alignment = Alignment(vertical="center")
 
-        # Autosize columns
         for column_cells in ws.columns:
             length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in column_cells)
             ws.column_dimensions[get_column_letter(column_cells[0].column)].width = min(length + 4, 60)
 
-        # Numeric formatting
         for col in ws.iter_cols(min_row=2, max_row=ws.max_row):
             if all((isinstance(c.value, (int, float)) or c.value is None) for c in col):
                 for cell in col:
@@ -250,10 +241,9 @@ def check_password(user: str, password: str) -> bool:
     """
     creds = st.secrets.get("credentials", None)
     if creds is None:
-        # Fallback local para desarrollo (siempre evitar en producción)
+        # Fallback local para desarrollo (evitar en producción)
         return (user == "admin" and password == "1234")
 
-    # intentos de lectura
     stored = None
     try:
         if hasattr(creds, "__contains__") and user in creds:
@@ -277,7 +267,6 @@ def check_password(user: str, password: str) -> bool:
         return password == stored
 
     if stored is not None:
-        # dict-like or AttrDict that puede tener 'password'
         try:
             if hasattr(stored, "get"):
                 pw = stored.get("password", None)
@@ -307,19 +296,24 @@ def main():
         st.session_state["logged_in"] = False
         st.session_state["usuario"] = None
 
+    # --------- LOGIN ----------
     if not st.session_state["logged_in"]:
         st.title("🔐 Acceso")
         user = st.text_input("Usuario")
         password = st.text_input("Contraseña", type="password")
-        if st.button("Iniciar sesión"):
+        login_clicked = st.button("Iniciar sesión")
+        if login_clicked:
             if check_password(user, password):
                 st.session_state["logged_in"] = True
                 st.session_state["usuario"] = user
                 st.success(f"Bienvenido, {user} ✅")
-                st.experimental_rerun()
+                # No usar st.experimental_rerun (compatibilidad con distintas versiones).
+                # Al no llamar a st.stop() aquí, la ejecución continua y la app mostrará la UI principal.
             else:
                 st.error("Usuario o contraseña incorrectos.")
-        st.stop()
+        # Si aún no se ha autenticado, detener la ejecución para que solo se muestre la pantalla de login.
+        if not st.session_state["logged_in"]:
+            st.stop()
 
     # UI principal
     st.markdown(
@@ -337,11 +331,12 @@ def main():
 
     col1, col2 = st.columns([1, 4])
     with col1:
+        # usar on_click para cambiar el estado y permitir que Streamlit vuelva a ejecutar la app automáticamente
         st.button("Cerrar sesión", on_click=lambda: logout())
-
     with col2:
         st.markdown('<div class="big-title">⚖️ Control de Abonos — Dashboard</div>', unsafe_allow_html=True)
         st.markdown('<div class="subtle">Gestión de casos, registro de abonos y reportes.</div>', unsafe_allow_html=True)
+
     st.write("---")
 
     # Cargar datos
@@ -367,10 +362,9 @@ def main():
                 try:
                     add_caso(conn, cliente, descripcion, valor_acordado, etapa, observaciones)
                     st.success("Caso agregado correctamente.")
-                    st.experimental_rerun()
                 except ValueError as e:
                     st.error(str(e))
-                except Exception as e:
+                except Exception:
                     logging.exception("Error agregando caso")
                     st.error("Error al agregar caso. Revisa los logs.")
 
@@ -396,7 +390,6 @@ def main():
                     try:
                         edit_caso(conn, caso_id_sel, cliente_e, descripcion_e, valor_e, etapa_e, obs_e)
                         st.success("Caso actualizado.")
-                        st.experimental_rerun()
                     except Exception:
                         logging.exception("Error editando caso")
                         st.error("Error al actualizar el caso. Revisa los logs.")
@@ -405,7 +398,6 @@ def main():
                         try:
                             delete_caso(conn, caso_id_sel)
                             st.success("Caso eliminado.")
-                            st.experimental_rerun()
                         except Exception:
                             logging.exception("Error eliminando caso")
                             st.error("Error al eliminar el caso. Revisa los logs.")
@@ -417,7 +409,6 @@ def main():
             st.info("Registra primero al menos un caso para agregar abonos.")
         else:
             st.markdown("Agregar un abono al caso seleccionado.")
-            # Usar selectbox con tuplas y format_func para evitar parsear strings
             opciones = [(int(r["id"]), f"{r['id']} — {r['cliente']} — {r['descripcion'] or ''}") for _, r in casos_df.iterrows()]
 
             with st.form("nuevo_abono_form"):
@@ -430,13 +421,12 @@ def main():
                     try:
                         add_abono(conn, fecha.isoformat(), monto, caso_id_seleccionado, observaciones)
                         st.success("Abono agregado correctamente.")
-                        st.experimental_rerun()
                     except ValueError as e:
                         st.error(str(e))
-                    except sqlite3.IntegrityError as e:
+                    except sqlite3.IntegrityError:
                         logging.exception("IntegrityError al insertar abono")
                         st.error("Error de integridad en la base de datos al insertar el abono.")
-                    except Exception as e:
+                    except Exception:
                         logging.exception("Error inesperado al insertar abono")
                         st.error("Ocurrió un error inesperado. Revisa los logs.")
 
@@ -446,7 +436,7 @@ def main():
             st.markdown("### Últimos abonos")
             st.dataframe(abonos, use_container_width=True)
 
-            # Opciones de edición / eliminación de abonos
+            # Editar / Eliminar abono
             st.markdown("#### Editar / Eliminar abono")
             opciones_abonos = [(int(r["id"]), f"{r['id']} — {r['cliente']} — {r['fecha']} — ${float(r['monto']):,.2f}") for _, r in abonos.iterrows()]
             elegido = st.selectbox("Selecciona abono", options=opciones_abonos, format_func=lambda x: x[1])
@@ -454,7 +444,6 @@ def main():
 
             with st.form("form_abono_edit"):
                 a_row = abonos.loc[abonos["id"] == abono_id_sel].iloc[0]
-                # caso selection: reuse opciones
                 caso_for_edit = st.selectbox("Caso (editar)", options=opciones, format_func=lambda x: x[1], index=[o[0] for o in opciones].index(int(a_row["caso_id"])))
                 fecha_e = st.date_input("Fecha", value=pd.to_datetime(a_row["fecha"]).date(), key="fecha_edit")
                 monto_e = st.number_input("Monto", value=float(a_row["monto"]), min_value=0.0, format="%.2f", key="monto_edit")
@@ -464,7 +453,6 @@ def main():
                     try:
                         edit_abono(conn, abono_id_sel, fecha_e.isoformat(), monto_e, caso_for_edit[0], obs_e)
                         st.success("Abono actualizado.")
-                        st.experimental_rerun()
                     except Exception:
                         logging.exception("Error editando abono")
                         st.error("Error al actualizar el abono. Revisa los logs.")
@@ -473,7 +461,6 @@ def main():
                         try:
                             delete_abono(conn, abono_id_sel)
                             st.success("Abono eliminado.")
-                            st.experimental_rerun()
                         except Exception:
                             logging.exception("Error eliminando abono")
                             st.error("Error al eliminar el abono. Revisa los logs.")
@@ -481,11 +468,10 @@ def main():
     # ------------------ TAB RESUMEN ------------------
     with tab_resumen:
         st.subheader("📊 Resumen por Caso")
-        resumen_df = resumen_por_caso(conn=None) if False else resumen_por_caso(conn)  # compatibility
+        resumen_df = resumen_por_caso(conn) if "resumen_por_caso" in globals() else pd.DataFrame()
         if resumen_df.empty:
             st.info("No hay datos disponibles.")
         else:
-            # Mostrar números como moneda para el usuario, pero mantener los valores reales
             display = resumen_df.copy()
             display["valor_acordado"] = display["valor_acordado"].apply(money)
             display["total_abonado"] = display["total_abonado"].apply(money)
@@ -495,7 +481,7 @@ def main():
     # ------------------ TAB REPORTES ------------------
     with tab_reportes:
         st.subheader("📑 Exportes")
-        df_export = resumen_por_caso(conn)
+        df_export = resumen_por_caso(conn) if "resumen_por_caso" in globals() else pd.DataFrame()
         if df_export.empty:
             st.info("No hay datos para exportar.")
         else:
@@ -506,8 +492,7 @@ def main():
 def logout():
     st.session_state["logged_in"] = False
     st.session_state["usuario"] = None
-    # Fuerza recarga
-    st.experimental_rerun()
+    # No usar experimental_rerun: el botón on_click provoca un rerun automático.
 
 
 if __name__ == "__main__":
