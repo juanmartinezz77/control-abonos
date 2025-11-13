@@ -48,31 +48,34 @@ def init_db(conn):
     ''')
     conn.commit()
 
+
 # ------------------ LOGIN ------------------
 
-def check_password():
-    """Verifica usuario y contraseña usando .streamlit/secrets.toml"""
-    def password_entered():
-        if (
-            st.session_state["username"] in st.secrets["credentials"]
-            and st.session_state["password"]
-            == st.secrets["credentials"][st.session_state["username"]]
-        ):
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]
+def login():
+    """Login basado en los secrets de Streamlit Cloud (.streamlit/secrets.toml)"""
+    st.title("🔐 Inicio de sesión")
+
+    # Verificar si existen credenciales en secrets
+    if "credentials" not in st.secrets:
+        st.error("No se encontró la sección [credentials] en secrets.toml.")
+        st.stop()
+
+    credentials = st.secrets["credentials"]
+
+    username = st.text_input("👤 Usuario")
+    password = st.text_input("🔒 Contraseña", type="password")
+
+    if st.button("Entrar"):
+        # Validar usuario
+        if username in credentials and "password" in credentials[username]:
+            if password == credentials[username]["password"]:
+                st.session_state["usuario"] = username
+                st.success(f"Bienvenido, {username} 👋")
+                st.rerun()
+            else:
+                st.error("Contraseña incorrecta.")
         else:
-            st.session_state["password_correct"] = False
-
-    if "password_correct" not in st.session_state:
-        st.text_input("👤 Usuario", key="username")
-        st.text_input("🔒 Contraseña", type="password", key="password", on_change=password_entered)
-        st.stop()
-
-    elif not st.session_state["password_correct"]:
-        st.text_input("👤 Usuario", key="username")
-        st.text_input("🔒 Contraseña", type="password", key="password", on_change=password_entered)
-        st.error("❌ Usuario o contraseña incorrectos")
-        st.stop()
+            st.error("Usuario no encontrado.")
 
 # ------------------ CRUD HELPERS ------------------
 
@@ -218,7 +221,23 @@ def show_error(msg):
 
 def main():
     st.set_page_config(page_title="Control de Abonos - Dashboard", layout="wide")
-    check_password()  # 🔐 Login obligatorio al inicio
+
+    # 🔐 Login sin .streamlit/secrets.toml
+    if "logged_in" not in st.session_state:
+        st.session_state["logged_in"] = False
+
+    if not st.session_state["logged_in"]:
+        st.title("🔐 Acceso restringido")
+        user = st.text_input("👤 Usuario")
+        password = st.text_input("🔒 Contraseña", type="password")
+        if st.button("Iniciar sesión"):
+            if user == "admin" and password == "1234":
+                st.session_state["logged_in"] = True
+                st.success("Acceso concedido ✅")
+                st.rerun()
+            else:
+                st.error("Usuario o contraseña incorrectos 🚫")
+        st.stop()
 
     st.markdown("""
         <style>
