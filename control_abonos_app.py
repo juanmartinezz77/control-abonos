@@ -198,31 +198,27 @@ def main():
     if "logged_in" not in st.session_state:
         st.session_state["logged_in"] = False
 
-    # LOGIN: robust handling for secrets formats (nested or flat), fallback to hardcoded credentials
-    if not st.session_state["logged_in"]:
+    # LOGIN robusto (acepta formato nested y plano). NO imprime contraseñas.
+    if not st.session_state.get("logged_in", False):
         st.title("🔐 Acceso restringido")
         user = st.text_input("👤 Usuario")
         password = st.text_input("🔒 Contraseña", type="password")
         if st.button("Iniciar sesión"):
             logged = False
-            # If credentials exist in secrets, try to validate
-            if "credentials" in st.secrets:
-                creds = st.secrets["credentials"]
-                stored = creds.get(user) if isinstance(creds, dict) else None
-                if stored is None:
-                    # user not found in secrets
-                    logged = False
-                else:
-                    # support nested dict style: credentials.user.password
-                    if isinstance(stored, dict) and "password" in stored:
-                        if password == stored["password"]:
-                            logged = True
-                    # support flat string style: credentials.user = "password"
-                    elif isinstance(stored, str):
-                        if password == stored:
-                            logged = True
+            creds = st.secrets.get("credentials", None)
+            if creds:
+                # creds puede ser dict-like
+                try:
+                    stored = creds.get(user) if isinstance(creds, dict) else None
+                except Exception:
+                    stored = None
+                if stored is not None:
+                    if isinstance(stored, dict) and stored.get("password") == password:
+                        logged = True
+                    elif isinstance(stored, str) and stored == password:
+                        logged = True
             else:
-                # fallback to the original hardcoded check (legacy)
+                # fallback local (solo si no hay secrets configurados)
                 if user == "admin" and password == "1234":
                     logged = True
 
