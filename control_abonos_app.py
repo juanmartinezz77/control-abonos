@@ -215,16 +215,34 @@ def main():
             st.write("Claves de usuario encontradas:", keys)
             if keys:
                 first = keys[0]
-                val = creds[first]
-                if isinstance(val, dict) and "password" in val:
-                    st.info(f"Estructura detectada: credentials.{first}.password (nested)")
+                val = None
+                # intenta varias formas de obtener el valor asociado al primer usuario (sin mostrar contraseña)
+                try:
+                    val = creds[first]
+                except Exception:
+                    try:
+                        val = getattr(creds, first)
+                    except Exception:
+                        val = None
+                st.write("repr(credentials[{}]):".format(first), repr(val))
+                # detecta si hay un campo 'password' como atributo o como clave
+                pw_field = None
+                try:
+                    if hasattr(val, "get"):
+                        pw_field = val.get("password", None)
+                except Exception:
+                    pw_field = None
+                if pw_field is None:
+                    pw_field = getattr(val, "password", None)
+                if pw_field is not None:
+                    st.info(f"Estructura detectada: credentials.{first}.password (nested or AttrDict-like)")
                 elif isinstance(val, str):
                     st.info(f"Estructura detectada: credentials.{first} = (flat string)")
                 else:
                     st.info(f"Estructura inesperada para credentials.{first}: {type(val).__name__}")
         st.stop()
 
-    # LOGIN robusto (acepta formato nested y plano). NO imprime contraseñas.
+    # LOGIN robusto (acepta múltiples formas: dict, AttrDict, atributo o string plano).
     if not st.session_state.get("logged_in", False):
         st.title("🔐 Acceso restringido")
         user = st.text_input("👤 Usuario")
@@ -232,20 +250,55 @@ def main():
         if st.button("Iniciar sesión"):
             logged = False
             creds = st.secrets.get("credentials", None)
-            if creds:
-                # creds puede ser dict-like
+
+            # Intentar obtener el "stored" de varias maneras para soportar AttrDict y dicts
+            stored = None
+            if creds is not None:
+                # 1) intenta acceso tipo mapping: creds[user]
                 try:
-                    stored = creds.get(user) if isinstance(creds, dict) else None
+                    if hasattr(creds, "__contains__") and user in creds:
+                        stored = creds[user]
                 except Exception:
                     stored = None
-                if stored is not None:
-                    if isinstance(stored, dict) and stored.get("password") == password:
-                        logged = True
-                    elif isinstance(stored, str) and stored == password:
-                        logged = True
-            else:
-                # fallback local (solo si no hay secrets configurados)
+
+                # 2) si no, intenta getattr (AttrDict puede exponer atributos)
+                if stored is None:
+                    try:
+                        stored = getattr(creds, user)
+                    except Exception:
+                        stored = None
+
+                # 3) si aún None, intenta .get si lo tiene
+                if stored is None:
+                    try:
+                        stored = creds.get(user) if hasattr(creds, "get") else None
+                    except Exception:
+                        stored = None
+
+            # Ahora 'stored' puede ser:
+            # - None
+            # - str (contraseña plana)
+            # - dict-like / AttrDict con clave/atributo "password"
+            pw_expected = None
+            if isinstance(stored, str):
+                pw_expected = stored
+            elif stored is not None:
+                # intenta .get("password")
+                try:
+                    if hasattr(stored, "get"):
+                        pw_expected = stored.get("password", None)
+                except Exception:
+                    pw_expected = None
+                # si no, intenta atributo
+                if pw_expected is None:
+                    pw_expected = getattr(stored, "password", None)
+
+            # fallback local si no hay st.secrets configurado
+            if creds is None:
                 if user == "admin" and password == "1234":
+                    logged = True
+            else:
+                if pw_expected is not None and password == pw_expected:
                     logged = True
 
             if logged:
